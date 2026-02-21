@@ -9,13 +9,13 @@ Usage:
     python visualize_trajectories.py --type figure8 --difficulty 0.5
     python visualize_trajectories.py --all-types
     python visualize_trajectories.py --library 0 --show-difficulty-range
+
+# run as
+#   ./_isaac_sim/python.sh /workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/racing_quadcopter/visualize_trajectories.py
 """
 
-import os
-# Force PyTorch to use CPU only, even if CUDA build is present
-os.environ["PYTORCH_FORCE_CPU"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for headless environments
 import argparse
 try:
     import matplotlib.pyplot as plt
@@ -30,10 +30,15 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[2] / "source"))
 
-from isaaclab_tasks.isaaclab_tasks.direct.quadcopter_copy.trajectory_generator import (
+from trajectory_generator import (
     TrajectoryLibrary,
     TrajectoryGeneratorCfg,
 )
+
+# Get script directory for saving plots
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+PLOT_DIR = SCRIPT_DIR / "trajectory_viz_plots"
 
 
 def visualize_single_trajectory(traj_type: str, difficulty: float = 0.5, seed: int = 42):
@@ -48,10 +53,8 @@ def visualize_single_trajectory(traj_type: str, difficulty: float = 0.5, seed: i
     cfg = TrajectoryGeneratorCfg(
         num_libraries=1,
         trajectories_per_library=100,
-        track_seed=seed,
     )
-    
-    generator = TrajectoryLibrary(cfg, device="cpu")
+    generator = TrajectoryLibrary(cfg=cfg, device="cpu", seed=seed)
     
     # Generate library
     library_type = traj_type
@@ -102,7 +105,7 @@ def visualize_single_trajectory(traj_type: str, difficulty: float = 0.5, seed: i
         selected_waypoints[:, 0],
         selected_waypoints[:, 1],
         selected_waypoints[:, 2],
-        c='red', s=20, alpha=0.5, label='Waypoints'
+        c='red', s=10, alpha=0.2, label='Waypoints'
     )
     
     # Plot gates
@@ -141,7 +144,9 @@ def visualize_single_trajectory(traj_type: str, difficulty: float = 0.5, seed: i
     ax.set_box_aspect([1, 1, 0.5])
     
     plt.tight_layout()
-    plt.show()
+    plot_path = PLOT_DIR / f"trajectory_{traj_type}_difficulty_{difficulty:.2f}.png"
+    plt.savefig(str(plot_path))
+    print(f"Saved plot to {plot_path}")
 
 
 def visualize_all_types(difficulty: float = 0.5, seed: int = 42):
@@ -159,9 +164,8 @@ def visualize_all_types(difficulty: float = 0.5, seed: int = 42):
     cfg = TrajectoryGeneratorCfg(
         num_libraries=len(trajectory_types),
         trajectories_per_library=100,
-        track_seed=seed,
     )
-    generator = TrajectoryLibrary(cfg, device="cpu")
+    generator = TrajectoryLibrary(cfg=cfg, device="cpu", seed=seed)
     
     for idx, traj_type in enumerate(trajectory_types):
         # Generate library
@@ -191,7 +195,7 @@ def visualize_all_types(difficulty: float = 0.5, seed: int = 42):
             selected_waypoints[:, 0],
             selected_waypoints[:, 1],
             selected_waypoints[:, 2],
-            c='red', s=10, alpha=0.5
+            c='red', s=10, alpha=0.2
         )
         
         # Mark start point
@@ -199,7 +203,7 @@ def visualize_all_types(difficulty: float = 0.5, seed: int = 42):
             [selected_waypoints[0, 0]],
             [selected_waypoints[0, 1]],
             [selected_waypoints[0, 2]],
-            c='lime', s=100, marker='*', edgecolors='black', linewidths=1
+            c='lime', s=1000, marker='*', edgecolors='black', linewidths=1
         )
         
         ax.set_xlabel('X (m)')
@@ -209,7 +213,9 @@ def visualize_all_types(difficulty: float = 0.5, seed: int = 42):
         ax.set_box_aspect([1, 1, 0.5])
     
     plt.tight_layout()
-    plt.show()
+    plot_path = PLOT_DIR / f"all_trajectory_types_difficulty_{difficulty:.2f}.png"
+    plt.savefig(str(plot_path))
+    print(f"Saved plot to {plot_path}")
 
 
 def visualize_difficulty_range(traj_type: str, library_idx: int = 0, seed: int = 42):
@@ -226,15 +232,14 @@ def visualize_difficulty_range(traj_type: str, library_idx: int = 0, seed: int =
     cfg = TrajectoryGeneratorCfg(
         num_libraries=1,
         trajectories_per_library=100,
-        track_seed=seed,
     )
-    generator = TrajectoryLibrary(cfg, device="cpu")
+    generator = TrajectoryLibrary(cfg=cfg, device="cpu", seed=seed)
     
     # Generate library
     waypoints, tangents, difficulties = generator._generate_single_library(0, traj_type)
     
     # Select 5 difficulty levels
-    difficulty_levels = [0.0, 0.25, 0.5, 0.75, 1.0]
+    difficulty_levels = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     
     fig = plt.figure(figsize=(20, 12))
     
@@ -263,7 +268,7 @@ def visualize_difficulty_range(traj_type: str, library_idx: int = 0, seed: int =
             selected_waypoints[:, 0],
             selected_waypoints[:, 1],
             selected_waypoints[:, 2],
-            c='red', s=10, alpha=0.5
+            c='red', s=10, alpha=0.2
         )
         
         # Mark start point
@@ -284,7 +289,119 @@ def visualize_difficulty_range(traj_type: str, library_idx: int = 0, seed: int =
     fig.suptitle(f'{traj_type.replace("_", " ").title()} - Difficulty Progression', fontsize=16, y=0.995)
     
     plt.tight_layout()
-    plt.show()
+    plot_path = PLOT_DIR / f"difficulty_range_{traj_type}.png"
+    plt.savefig(str(plot_path))
+    print(f"Saved plot to {plot_path}")
+
+
+def visualize_all_types_difficulty_range(seed: int = 42):
+    """Visualize difficulty range for all trajectory types.
+    
+    Shows 5 different difficulty levels for each trajectory type.
+    Generates one figure per trajectory type.
+    
+    Args:
+        seed: Random seed for reproducibility
+    """
+    trajectory_types = ["banked_loop", "figure8", "cloverleaf", "racing_circuit", "spline"]
+    
+    # Create generator with one library per type
+    cfg = TrajectoryGeneratorCfg(
+        num_libraries=len(trajectory_types),
+        trajectories_per_library=100,
+    )
+    generator = TrajectoryLibrary(cfg=cfg, device="cpu", seed=seed)
+    
+    # Create one figure per trajectory type
+    for traj_idx, traj_type in enumerate(trajectory_types):
+        fig = plt.figure(figsize=(20, 12))
+        
+        # Generate library for this type
+        waypoints, tangents, difficulties = generator._generate_single_library(traj_idx, traj_type)
+        
+        # Get actual difficulty range and sample evenly from it
+        min_diff = difficulties.min().item()
+        max_diff = difficulties.max().item()
+        print(f"{traj_type}: difficulty range [{min_diff:.3f}, {max_diff:.3f}]")
+        
+        # Create 6 evenly-spaced difficulty levels from actual range
+        difficulty_levels = [min_diff + i * (max_diff - min_diff) / 5 for i in range(6)]
+        
+        for idx, target_diff in enumerate(difficulty_levels):
+            # Find trajectory closest to target difficulty
+            diff_errors = torch.abs(difficulties - target_diff)
+            selected_idx = torch.argmin(diff_errors)
+            actual_difficulty = difficulties[selected_idx].item()
+            
+            # Get waypoint data
+            selected_waypoints = waypoints[selected_idx].numpy()
+            selected_tangents = tangents[selected_idx].numpy()
+            
+            # Compute gates
+            gate_spacing = 10.0  # meters
+            segment_lengths = np.linalg.norm(np.diff(selected_waypoints, axis=0), axis=1)
+            cumulative_arc = np.concatenate([[0], np.cumsum(segment_lengths)])
+            total_arc = cumulative_arc[-1]
+            num_gates = int(total_arc / gate_spacing)
+            
+            gate_positions = []
+            for g in range(num_gates):
+                target_arc = g * gate_spacing
+                gate_idx = np.searchsorted(cumulative_arc, target_arc)
+                gate_idx = np.clip(gate_idx, 0, len(selected_waypoints) - 1)
+                gate_positions.append(selected_waypoints[gate_idx])
+            gate_positions = np.array(gate_positions)
+            
+            # Create subplot
+            ax = fig.add_subplot(2, 3, idx + 1, projection='3d')
+            
+            # Plot trajectory
+            ax.plot(
+                selected_waypoints[:, 0],
+                selected_waypoints[:, 1],
+                selected_waypoints[:, 2],
+                'b-', linewidth=2
+            )
+            
+            # Plot waypoints
+            ax.scatter(
+                selected_waypoints[:, 0],
+                selected_waypoints[:, 1],
+                selected_waypoints[:, 2],
+                c='red', s=10, alpha=0.2
+            )
+            
+            # Plot gates
+            if len(gate_positions) > 0:
+                ax.scatter(
+                    gate_positions[:, 0],
+                    gate_positions[:, 1],
+                    gate_positions[:, 2],
+                    c='orange', s=100, marker='s', alpha=0.7, edgecolors='black', linewidths=1.5
+                )
+            
+            # Mark start point
+            ax.scatter(
+                [selected_waypoints[0, 0]],
+                [selected_waypoints[0, 1]],
+                [selected_waypoints[0, 2]],
+                c='lime', s=100, marker='*', edgecolors='black', linewidths=1
+            )
+            
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
+            ax.set_zlabel('Z (m)')
+            ax.set_title(f'Difficulty: {actual_difficulty:.3f}')
+            ax.set_box_aspect([1, 1, 0.5])
+        
+        # Add overall title
+        fig.suptitle(f'{traj_type.replace("_", " ").title()} - Difficulty Progression', fontsize=16, y=0.995)
+        
+        plt.tight_layout()
+        plot_path = PLOT_DIR / f"all_types_difficulty_range_{traj_type}.png"
+        plt.savefig(str(plot_path))
+        print(f"Saved plot to {plot_path}")
+        plt.close(fig)
 
 
 def visualize_library_statistics(seed: int = 42):
@@ -297,9 +414,8 @@ def visualize_library_statistics(seed: int = 42):
     cfg = TrajectoryGeneratorCfg(
         num_libraries=30,
         trajectories_per_library=100,
-        track_seed=seed,
     )
-    generator = TrajectoryLibrary(cfg, device="cpu")
+    generator = TrajectoryLibrary(cfg=cfg, device="cpu", seed=seed)
     
     # Collect statistics
     trajectory_types = TrajectoryLibrary.TRAJECTORY_TYPES
@@ -363,7 +479,9 @@ def visualize_library_statistics(seed: int = 42):
     plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
     
     plt.tight_layout()
-    plt.show()
+    plot_path = PLOT_DIR / "library_statistics.png"
+    plt.savefig(str(plot_path))
+    print(f"Saved plot to {plot_path}")
     
     # Print summary statistics
     print("\n" + "="*60)
@@ -449,10 +567,15 @@ Examples:
     )
     
     args = parser.parse_args()
+
+    PLOT_DIR.mkdir(exist_ok=True)
     
     # Validate arguments
     if args.statistics:
         visualize_library_statistics(args.seed)
+    elif args.all_types and args.show_difficulty_range:
+        # Show difficulty range for all trajectory types
+        visualize_all_types_difficulty_range(args.seed)
     elif args.all_types:
         visualize_all_types(args.difficulty, args.seed)
     elif args.show_difficulty_range:

@@ -353,6 +353,7 @@ class DirectRLEnv(gym.Env):
         Returns:
             A tuple containing the observations, rewards, resets (terminated and truncated) and extras.
         """
+        # print(f"[TRACE] Step START")
         action = action.to(self.device)
         # add action noise
         if self.cfg.action_noise_model:
@@ -414,6 +415,8 @@ class DirectRLEnv(gym.Env):
             self.obs_buf["policy"] = self._observation_noise_model(self.obs_buf["policy"])
 
         # return observations, rewards, resets and extras
+
+        # print(f"[TRACE] Step END")
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
     @staticmethod

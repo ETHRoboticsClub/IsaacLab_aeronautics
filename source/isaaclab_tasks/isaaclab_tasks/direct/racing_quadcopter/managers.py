@@ -23,7 +23,7 @@ class RewardConfig:
     """Configuration for reward function weights and parameters."""
 
     progress_scale: float = 10.0
-    contour_error_scale: float = -2.0
+    contour_error_scale: float = 2.0
     velocity_alignment_scale: float = 1.0
     speed_tracking_scale: float = 0.5
     velocity_limit_penalty_scale: float = -2.0
@@ -59,6 +59,7 @@ class RewardManager:
         self._previous_progress = torch.zeros(num_envs, device=device)
         self._closest_traj_point = torch.zeros(num_envs, 3, device=device)
         self._contour_error = torch.zeros(num_envs, device=device)
+        self._contour_error_vector = torch.zeros(num_envs, 3, device=device)
         self._traj_tangent = torch.zeros(num_envs, 3, device=device)
 
         # Episode statistics
@@ -81,6 +82,7 @@ class RewardManager:
         robot: Articulation,
         actions: torch.Tensor,
         previous_actions: torch.Tensor,
+        velocity_limit: torch.Tensor,
         step_dt: float,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute total reward and individual components.
@@ -95,17 +97,21 @@ class RewardManager:
             total_reward: Combined reward [num_envs].
             reward_components: Dictionary of individual reward terms.
         """
+        # print(f"[TRACE] compute_rewards START")
         # Update trajectory tracking
         self._closest_traj_point, self._contour_error, self._traj_tangent = self._trajectory.update_progress(
             robot.data.root_pos_w
         )
+        
+        # Compute contour error vector (from trajectory to drone) for observations
+        self._contour_error_vector = robot.data.root_pos_w - self._closest_traj_point
 
         # Compute individual reward components
         progress_reward = self._compute_progress_reward()
         contour_reward = self._compute_contour_reward()
         velocity_alignment_reward = self._compute_velocity_alignment_reward(robot)
         speed_reward = self._compute_speed_tracking_reward(robot)
-        velocity_limit_penalty = self._compute_velocity_limit_penalty(robot)
+        velocity_limit_penalty = self._compute_velocity_limit_penalty(robot, velocity_limit)
         orientation_penalty = self._compute_orientation_penalty(robot)
         ang_vel_penalty = self._compute_angular_velocity_penalty(robot)
         action_smoothness_penalty = self._compute_action_smoothness_penalty(actions, previous_actions)
@@ -129,6 +135,7 @@ class RewardManager:
         # Total reward
         total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
+        # print(f"[TRACE] compute_rewards END: total_reward mean={total_reward.mean().item():.3f}")
         return total_reward, rewards
 
     def _compute_progress_reward(self) -> torch.Tensor:
@@ -161,7 +168,11 @@ class RewardManager:
         gate_multiplier = self._trajectory.get_gate_penalty_multiplier(self._closest_traj_point)
         
         # Apply multiplier to contour error penalty
-        return torch.exp(-2.0 * self._contour_error * gate_multiplier)
+        weighted_contour_error = self._contour_error * gate_multiplier
+
+        rough_reward = torch.exp(-2.0 * weighted_contour_error)
+        fine_reward = torch.exp(-20.0 * weighted_contour_error)
+        return rough_reward + fine_reward  # Combines a smooth reward with a sharper one for precision near the trajectory
 
     def _compute_velocity_alignment_reward(self, robot: Articulation) -> torch.Tensor:
         """Compute reward for velocity aligned with trajectory direction."""
@@ -184,12 +195,10 @@ class RewardManager:
         speed_error = torch.abs(speed - desired_speed)
         return torch.exp(-speed_error)
 
-    def _compute_velocity_limit_penalty(self, robot: Articulation) -> torch.Tensor:
+    def _compute_velocity_limit_penalty(self, robot: Articulation, velocity_limit: torch.Tensor) -> torch.Tensor:
         """Compute penalty for exceeding velocity limit."""
         velocity_world = robot.data.root_lin_vel_w
         speed = torch.norm(velocity_world, dim=1)
-        velocity_limit = self._trajectory.velocity_limit
-
         # Only penalize when over limit
         velocity_excess = torch.clamp(speed - velocity_limit, min=0.0)
         return torch.square(velocity_excess)
@@ -197,8 +206,9 @@ class RewardManager:
     def _compute_orientation_penalty(self, robot: Articulation) -> torch.Tensor:
         """Compute penalty for non-upright orientation."""
         # Gravity in body frame should point down (0, 0, -1)
-        gravity_z = robot.data.projected_gravity_b[:, 2]
-        return torch.square(gravity_z + 1.0)
+        # gravity_z = robot.data.projected_gravity_b[:, 2]
+        # return torch.square(gravity_z + 1.0)
+        return torch.sum(torch.square(robot.data.projected_gravity_b[:, :2]), dim=1)
 
     def _compute_angular_velocity_penalty(self, robot: Articulation) -> torch.Tensor:
         """Compute penalty for excessive angular velocity."""
@@ -242,13 +252,27 @@ class RewardManager:
         """Current contour error for all environments."""
         return self._contour_error
 
+    @property
+    def contour_error_vector(self) -> torch.Tensor:
+        """Current contour error vector (from trajectory to drone) for all environments."""
+        return self._contour_error_vector
+    
+    @property
+    def closest_point(self) -> torch.Tensor:
+        """Closest point on trajectory for all environments."""
+        return self._closest_traj_point
+
 
 @dataclass
 class ObservationConfig:
     """Configuration for observation generation."""
 
-    history_length: int = 3
-    lookahead_distances: tuple[float, ...] = (0.3, 0.6, 1.0, 1.3, 1.6, 2.0)
+    history_length: int = 0
+    lookahead_distances: tuple[float, ...] = (0.0, 0.2, 0.5, 0.9, 1.4, 2.0)
+    include_velocity_limit: bool = True  # Include current velocity limit
+    include_contour_error: bool = True  # Include contour error vector in body frame
+    include_speed_error: bool = True  # Include speed error (current - desired)
+    include_gate_proximity: bool = True  # Include distance to nearest gate
 
 
 class ObservationManager:
@@ -261,6 +285,7 @@ class ObservationManager:
         action_dim: int,
         device: str,
         trajectory: RacingTrajectory,
+        velocity_limit: torch.Tensor,
     ):
         """Initialize observation manager.
 
@@ -270,16 +295,33 @@ class ObservationManager:
             action_dim: Dimension of action space.
             device: Device for tensor operations.
             trajectory: Racing trajectory instance.
+            velocity_limit: Per-environment velocity limit for normalization. Defaults to 3.0 m/s.
         """
         self.cfg = cfg
         self.num_envs = num_envs
         self.device = device
         self._trajectory = trajectory
+        self._action_dim = action_dim
+        self._velocity_limit = velocity_limit
 
         # History buffers [num_envs, history_length, feature_dim]
         self._lin_vel_history = torch.zeros(num_envs, cfg.history_length, 3, device=device)
         self._ang_vel_history = torch.zeros(num_envs, cfg.history_length, 3, device=device)
         self._action_history = torch.zeros(num_envs, cfg.history_length, action_dim, device=device)
+        
+        # Cache for contour error vector (set by reward manager)
+        self._contour_error_vector_w = torch.zeros(num_envs, 3, device=device)
+        self._closest_point_w = torch.zeros(num_envs, 3, device=device)
+
+    def set_tracking_info(self, closest_point: torch.Tensor, contour_error_vector: torch.Tensor) -> None:
+        """Set tracking information from reward manager for observation computation.
+        
+        Args:
+            closest_point: [num_envs, 3] closest point on trajectory in world frame
+            contour_error_vector: [num_envs, 3] vector from trajectory to drone in world frame
+        """
+        self._closest_point_w = closest_point
+        self._contour_error_vector_w = contour_error_vector
 
     def compute_observations(self, robot: Articulation, actions: torch.Tensor) -> torch.Tensor:
         """Compute observation vector for the policy network.
@@ -291,34 +333,124 @@ class ObservationManager:
         Returns:
             observations: Combined observation vector [num_envs, obs_dim].
         """
+        # print(f"[TRACE] compute_observations START")
         # Get look-ahead points along trajectory
-        lookahead_points_w = self._trajectory.get_lookahead_points(robot.data.root_pos_w)
+        lookahead_points_w = self._trajectory.get_lookahead_points(robot.data.root_pos_w,
+            distances=self.cfg.lookahead_distances)
         lookahead_points_b = self._transform_lookahead_to_body_frame(robot, lookahead_points_w)
 
         # Get velocity limit
-        velocity_limit = self._trajectory.velocity_limit.unsqueeze(-1)
+        velocity_limit = self._velocity_limit.unsqueeze(-1)
 
-        # Flatten history buffers
-        lin_vel_hist_flat = self._lin_vel_history.reshape(self.num_envs, -1)
-        ang_vel_hist_flat = self._ang_vel_history.reshape(self.num_envs, -1)
-        action_hist_flat = self._action_history.reshape(self.num_envs, -1)
+        # Build observation list
+        obs_components = [
+            robot.data.root_lin_vel_b,  # [3] current linear velocity
+            robot.data.root_ang_vel_b,  # [3] current angular velocity
+            robot.data.projected_gravity_b,  # [3] gravity direction
+        ]
 
-        # Combine all observations
-        obs = torch.cat(
-            [
-                robot.data.root_lin_vel_b,  # [3] current linear velocity
-                robot.data.root_ang_vel_b,  # [3] current angular velocity
-                robot.data.projected_gravity_b,  # [3] gravity direction
-                velocity_limit,  # [1] current velocity limit
-                lookahead_points_b,  # [num_lookahead * 3] trajectory lookahead points
-                lin_vel_hist_flat,  # [history_length * 3] past linear velocities
-                ang_vel_hist_flat,  # [history_length * 3] past angular velocities
-                action_hist_flat,  # [history_length * action_dim] past actions
-            ],
-            dim=-1,
+        if self.cfg.include_velocity_limit:
+            obs_components.append(velocity_limit)  # [1] current velocity limit
+        
+        # Add optional observations
+        if self.cfg.include_contour_error:
+            # Transform contour error vector to body frame
+            contour_error_b = self._transform_vector_to_body_frame(
+                robot, self._contour_error_vector_w
+            )
+            obs_components.append(contour_error_b)  # [3]
+        
+        if self.cfg.include_speed_error:
+            # Speed error: current speed - desired speed
+            current_speed = torch.norm(robot.data.root_lin_vel_w, dim=1, keepdim=True)
+            desired_speed = torch.full_like(current_speed, self._trajectory.cfg.desired_speed)
+            speed_error = (current_speed - desired_speed) / desired_speed  # Normalized
+            obs_components.append(speed_error)  # [1]
+        
+        if self.cfg.include_gate_proximity:
+            # Distance to nearest gate (normalized by gate spacing)
+            gate_proximity = self._compute_gate_proximity()
+            obs_components.append(gate_proximity)  # [1]
+
+        # Add history observations
+        if self.cfg.history_length > 0:
+            # Flatten history buffers
+            lin_vel_hist_flat = self._lin_vel_history.reshape(self.num_envs, -1)
+            ang_vel_hist_flat = self._ang_vel_history.reshape(self.num_envs, -1)
+            action_hist_flat = self._action_history.reshape(self.num_envs, -1)
+
+            obs_components.extend([
+                lin_vel_hist_flat,  # [history_length * 3]
+                ang_vel_hist_flat,  # [history_length * 3]
+                action_hist_flat,   # [history_length * action_dim]
+            ])
+                
+        # Add lookahead points and history
+        obs_components.append(
+            lookahead_points_b  # [num_lookahead * 3] trajectory lookahead points
         )
 
+        # Combine all observations
+        obs = torch.cat(obs_components, dim=-1)
+
+        # print(f"[TRACE] compute_observations END: obs shape={obs.shape}")
         return obs
+    
+    def _transform_vector_to_body_frame(self, robot: Articulation, vector_w: torch.Tensor) -> torch.Tensor:
+        """Transform a vector from world frame to body frame.
+        
+        Args:
+            robot: Robot articulation with pose data.
+            vector_w: [num_envs, 3] vector in world frame.
+            
+        Returns:
+            vector_b: [num_envs, 3] vector in body frame.
+        """
+        from isaaclab.utils.math import quat_rotate_inverse
+        return quat_rotate_inverse(robot.data.root_quat_w, vector_w)
+    
+    def _compute_gate_proximity(self) -> torch.Tensor:
+        """Compute normalized distance to nearest gate along trajectory.
+        
+        Returns:
+            gate_proximity: [num_envs, 1] normalized distance (0 = at gate, 1 = far from gate)
+        """
+        if not self._trajectory.gates_enabled or self._trajectory.num_gates_per_env is None:
+            return torch.zeros(self.num_envs, 1, device=self.device)
+        
+        if self._trajectory.gate_progress is None or self._trajectory.total_arc_length is None:
+            return torch.zeros(self.num_envs, 1, device=self.device)
+        
+        max_gates = self._trajectory.gate_progress.shape[1]
+        
+        # Create mask for valid gates per env: [num_envs, max_gates]
+        gate_range = torch.arange(max_gates, device=self.device).unsqueeze(0)
+        valid_mask = gate_range < self._trajectory.num_gates_per_env.unsqueeze(1)
+        
+        # Progress diffs: [num_envs, max_gates]
+        progress_diffs = (self._trajectory.progress.unsqueeze(1) - self._trajectory.gate_progress).abs()
+        
+        # Handle wraparound
+        progress_diffs_wrap = torch.minimum(
+            progress_diffs,
+            self._trajectory.total_arc_length.unsqueeze(1) - progress_diffs
+        )
+        
+        # Set invalid gates to large distance
+        progress_diffs_wrap = torch.where(valid_mask, progress_diffs_wrap, torch.tensor(1e10, device=self.device))
+        
+        # Get distance to nearest gate: [num_envs]
+        nearest_dist, _ = progress_diffs_wrap.min(dim=1)
+        
+        # Normalize by gate spacing (0 = at gate, 1 = midway between gates)
+        gate_proximity = nearest_dist / (self._trajectory.cfg.gate_spacing / 2.0)
+        
+        # Envs with no gates get 1.0 (far from gate)
+        has_gates = self._trajectory.num_gates_per_env > 0
+        gate_proximity = torch.where(has_gates, gate_proximity, torch.ones_like(gate_proximity))
+        
+        gate_proximity = torch.clamp(gate_proximity, 0.0, 1.0)
+        return gate_proximity.unsqueeze(-1)
 
     def _transform_lookahead_to_body_frame(
         self, robot: Articulation, lookahead_points_w: torch.Tensor
@@ -352,6 +484,10 @@ class ObservationManager:
             robot: Robot articulation with current state.
             actions: Current actions [num_envs, action_dim].
         """
+        # Skip if history is disabled
+        if self.cfg.history_length == 0:
+            return
+            
         # Roll history: move timestep t to t-1, t-1 to t-2, etc.
         self._lin_vel_history = torch.roll(self._lin_vel_history, shifts=1, dims=1)
         self._ang_vel_history = torch.roll(self._ang_vel_history, shifts=1, dims=1)
@@ -368,9 +504,14 @@ class ObservationManager:
         Args:
             env_ids: Environment indices to reset.
         """
+        if self.cfg.history_length == 0:
+            return
+            
         self._lin_vel_history[env_ids] = 0.0
         self._ang_vel_history[env_ids] = 0.0
         self._action_history[env_ids] = 0.0
+        self._contour_error_vector_w[env_ids] = 0.0
+        self._closest_point_w[env_ids] = 0.0
 
     @staticmethod
     def get_observation_dim(cfg: ObservationConfig, action_dim: int) -> int:
@@ -384,9 +525,19 @@ class ObservationManager:
             Total observation dimension.
         """
         base_dim = 10  # lin_vel(3) + ang_vel(3) + gravity(3) + velocity_limit(1)
+        
+        # Optional observations
+        optional_dim = 0
+        if cfg.include_contour_error:
+            optional_dim += 3  # contour error vector in body frame
+        if cfg.include_speed_error:
+            optional_dim += 1  # speed error
+        if cfg.include_gate_proximity:
+            optional_dim += 1  # gate proximity
+        
         lookahead_dim = len(cfg.lookahead_distances) * 3
         history_dim = (3 + 3 + action_dim) * cfg.history_length
-        return base_dim + lookahead_dim + history_dim
+        return base_dim + optional_dim + lookahead_dim + history_dim
 
 
 class DisturbanceManager:
@@ -454,7 +605,6 @@ class DisturbanceManager:
             self._torque_disturbance[:, 0, :] = (
                 torch.randn(self.num_envs, 3, device=self.device) * 
                 self._episode_torque_std.unsqueeze(1)
-            )
             )
         else:
             self._force_disturbance.zero_()

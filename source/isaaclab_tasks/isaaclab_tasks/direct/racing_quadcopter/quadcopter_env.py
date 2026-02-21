@@ -40,7 +40,7 @@ from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: "QuadcopterEnvCopy", window_name: str = "IsaacLab"):
+    def __init__(self, env: "RacingQuadcopterEnv", window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -58,74 +58,92 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 
 
 @configclass
-class QuadcopterEnvCfgCopy(DirectRLEnvCfg):
+class RacingQuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 10.0
+    episode_length_s = 15.0
     decimation = 2
     action_space = 4
     # observation_space calculation:
     # base: lin_vel(3) + ang_vel(3) + gravity(3) + velocity_limit(1) = 10
+    # optional: contour_error(3) + speed_error(1) + progress(1) + gate_proximity(1) = 6
     # lookahead points: 6 * 3 = 18
     # history: (lin_vel(3) + ang_vel(3) + actions(4)) * history_length
-    history_length = 3  # Number of past timesteps to include
-    observation_space = 10 + 18 + (3 + 3 + 4) * history_length  # 28 + 30 = 58
     state_space = 0
     debug_vis = True
+
+    lookahead_distances = (0.0, 0.1, 0.3, 0.5, 0.9, 1.4)
+
+    # velocity limit configuration
+    velocity_limit: float = 30.0  # Maximum allowed speed (m/s)
+    randomize_velocity_limit: bool = False  # Randomize limit per episode
+    velocity_limit_range: tuple[float, float] = (1.5, 4.0)  # Random range for velocity limit
 
     # trajectory config
     trajectory: TrajectoryConfig = TrajectoryConfig(
         trajectory_type="library",
-        radius=2.0,
+        radius=5.0,
         height=1.5,
-        num_waypoints=100,
-        desired_speed=2.0,
-        lookahead_distances=(0.3, 0.6, 1.0, 1.3, 1.6, 2.0),
-        velocity_limit=3.0,
-        randomize_velocity_limit=True,
-        velocity_limit_range=(1.5, 4.0),
+        waypoints_density=6.0,
+        desired_speed=1.0,
+        lookahead_distances=lookahead_distances,
         use_trajectory_library=True,
         track_seed=42,
+        trajectories_per_env=1,  # Each environment gets 1 unique trajectory (set to 3 for curriculum learning)
+        gate_spacing=4.0,
+        gate_size=0.5,
     )
 
     # observation config
     observation: ObservationConfig = ObservationConfig(
-        history_length=3,
-        lookahead_distances=(0.3, 0.6, 1.0, 1.3, 1.6, 2.0),
+        history_length=0,
+        lookahead_distances=lookahead_distances,
+        include_velocity_limit=True,
+        include_contour_error=True,
+        include_speed_error=True,
+        include_gate_proximity=True,
     )
+
+    observation_space = ObservationManager.get_observation_dim(observation, action_space)
 
     # reward config
     reward: RewardConfig = RewardConfig(
-        progress_scale=10.0,
-        contour_error_scale=-2.0,
-        velocity_alignment_scale=1.0,
-        speed_tracking_scale=0.5,
-        velocity_limit_penalty_scale=-2.0,
-        orientation_penalty_scale=-0.5,
-        ang_vel_penalty_scale=-0.01,
-        action_smoothness_scale=-0.001,
+        progress_scale=0.2,
+        contour_error_scale=0.04,
+        velocity_alignment_scale=0.02,
+        speed_tracking_scale=0.00,
+        velocity_limit_penalty_scale=-0.02,
+        orientation_penalty_scale=-0.002,
+        ang_vel_penalty_scale=-0.0005,
+        action_smoothness_scale=-0.0001,
     )
     
     # disturbances for robustness
-    enable_disturbances: bool = True
+    enable_disturbances: bool = False
     force_disturbance_scale: float = 0.05  # Scale of random force as fraction of weight
     torque_disturbance_scale: float = 0.02  # Scale of random torque
 
     # curriculum learning
-    enable_curriculum: bool = True  # Enable curriculum learning for trajectories
+    enable_curriculum: bool = False  # Enable curriculum learning for trajectories
     curriculum: CurriculumCfg = CurriculumCfg(
-        contour_error_threshold=0.15,
-        progress_velocity_threshold=0.8,
-        success_streak_required=50,
+        # Good performance thresholds (advance difficulty)
+        good_contour_error_threshold=0.10,
+        good_progress_velocity_threshold=1.0,
+        # Bad performance thresholds (demote difficulty)
+        bad_contour_error_threshold=0.25,
+        bad_progress_velocity_threshold=0.5,
+        # Difficulty settings
         initial_difficulty=0.0,
         max_difficulty=1.0,
-        use_continuous_progression=True,
-        base_increment=0.05,
-        max_increment=0.15,
-        base_decrement=0.05,
-        max_decrement=0.15,
-        enable_demotion=True,
-        failure_streak_threshold=100,
+        # Random adjustment amounts
+        max_advancement_increment=0.10,  # Random [0, 0.10] when good
+        max_demotion_decrement=0.10,  # Random [0, 0.10] when bad
     )
+    
+    # Termination thresholds
+    off_track_threshold: float = 2.0  # Max contour error before termination (meters)
+    upside_down_threshold: float = 0.75  # Gravity z-component threshold (>0.5 means >60° tilt)
+    min_height: float = 0.3  # Minimum height before ground crash termination (meters)
+    max_velocity: float = 100.0  # Maximum velocity before runaway termination (m/s)
 
     ui_window_class_type = QuadcopterEnvWindow
 
@@ -166,7 +184,7 @@ class QuadcopterEnvCfgCopy(DirectRLEnvCfg):
     moment_scale = 0.01
 
 
-class QuadcopterEnvCopy(DirectRLEnv):
+class RacingQuadcopterEnv(DirectRLEnv):
     """Quadcopter racing environment with time-independent trajectory tracking.
     
     This environment trains a quadcopter to follow a racing trajectory with:
@@ -176,9 +194,9 @@ class QuadcopterEnvCopy(DirectRLEnv):
     - Temporal observation history for better control
     """
     
-    cfg: QuadcopterEnvCfgCopy
+    cfg: RacingQuadcopterEnvCfg
 
-    def __init__(self, cfg: QuadcopterEnvCfgCopy, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: RacingQuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Action tracking
@@ -193,8 +211,13 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
-        # Initialize trajectory
+        # Initialize trajectory AFTER parent init (when we have device and num_envs)
         self._trajectory = RacingTrajectory(cfg.trajectory, self.device, self.num_envs)
+        # Set environment origins now that terrain is created
+        self._trajectory.set_environment_origins(self._terrain.env_origins)
+
+        # Per-environment velocity limit
+        self._velocity_limit = torch.ones(self.num_envs, device=self.device) * cfg.velocity_limit
 
         # Initialize managers
         self._reward_manager = RewardManager(
@@ -206,9 +229,10 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self._observation_manager = ObservationManager(
             cfg.observation,
             self.num_envs,
-            self.cfg.action_space,
+            cfg.action_space,
             self.device,
             self._trajectory,
+            self._velocity_limit,
         )
         self._disturbance_manager = DisturbanceManager(
             self.num_envs,
@@ -238,6 +262,13 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self._episode_progress_velocities = torch.zeros(self.num_envs, device=self.device)
         self._episode_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
 
+        # Termination reason tracking (for logging)
+        self._last_off_track = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._last_gate_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._last_upside_down = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._last_ground_crash = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._last_runaway = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         # Add handle for debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 
@@ -251,6 +282,8 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
+        
+        # Trajectory will be initialized in __init__ after this method completes
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -272,8 +305,8 @@ class QuadcopterEnvCopy(DirectRLEnv):
         if self._curriculum_manager is not None:
             # Accumulate contour error and progress velocity
             contour_error = self._reward_manager.contour_error
-            progress_velocity = torch.norm(self._robot.data.root_lin_vel_w[:, :2], dim=1) * \
-                               torch.sum(self._robot.data.root_lin_vel_w * self._trajectory.tangents[self._trajectory.closest_idx][:, :3], dim=1).sign()
+            # Use proper progress velocity calculation (dot product with tangent)
+            progress_velocity = self._trajectory.get_progress_velocity(self._robot.data.root_lin_vel_w)
             
             self._episode_contour_errors += contour_error
             self._episode_progress_velocities += progress_velocity
@@ -291,6 +324,11 @@ class QuadcopterEnvCopy(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         """Compute observations for the policy network."""
+        # Pass tracking info from reward manager to observation manager
+        self._observation_manager.set_tracking_info(
+            self._reward_manager.closest_point,
+            self._reward_manager.contour_error_vector,
+        )
         obs = self._observation_manager.compute_observations(self._robot, self._actions)
         return {"policy": obs}
 
@@ -300,6 +338,7 @@ class QuadcopterEnvCopy(DirectRLEnv):
             self._robot,
             self._actions,
             self._previous_actions,
+            self._velocity_limit,
             self.step_dt,
         )
         return total_reward
@@ -312,39 +351,61 @@ class QuadcopterEnvCopy(DirectRLEnv):
             time_out: Boolean tensor indicating episode timeout.
         """
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        
-        # Check altitude boundaries
-        altitude_died = torch.logical_or(
-            self._robot.data.root_pos_w[:, 2] < 0.1,
-            self._robot.data.root_pos_w[:, 2] > 2.0
-        )
+
+        # Check contour error (off-track)
+        contour_error = self._reward_manager.contour_error
+        off_track = contour_error > self.cfg.off_track_threshold
         
         # Check gate collisions
-        contour_error = self._reward_manager.contour_error
-        gate_collision = self._trajectory.check_gate_collision(
-            self._robot.data.root_pos_w,
-            contour_error
-        )
+        check_gate_collision = False
+        if check_gate_collision:
+            gate_collision = self._trajectory.check_gate_collision(
+                self._robot.data.root_pos_w,
+                contour_error
+            )
+        else:
+            gate_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         
-        # Combine all death conditions
-        died = torch.logical_or(altitude_died, gate_collision)
+        # Safety terminations
+        # Upside down: gravity in body frame pointing up (z > 0.5 means >60° tilt)
+        upside_down = self._robot.data.projected_gravity_b[:, 2] > self.cfg.upside_down_threshold
+        
+        # Ground collision: below minimum height
+        ground_crash = self._robot.data.root_pos_w[:, 2] < self.cfg.min_height
+        
+        # Runaway velocity: exceeding maximum safe speed
+        runaway = torch.norm(self._robot.data.root_lin_vel_w, dim=1) > self.cfg.max_velocity
+        
+        # Combine all death conditions (first match wins for categorization)
+        died = off_track | gate_collision | upside_down | ground_crash | runaway
+        
+        # Store termination reasons for logging in _reset_idx
+        self._last_off_track = off_track
+        self._last_gate_collision = gate_collision
+        self._last_upside_down = upside_down
+        self._last_ground_crash = ground_crash
+        self._last_runaway = runaway
         
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset specified environments."""
+        # print(f"[TRACE] _reset_idx START: num_envs={len(env_ids) if env_ids is not None else 'all'}")
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
         # Gather logging statistics
         final_contour_error = self._reward_manager.contour_error[env_ids].mean()
-        final_progress = self._trajectory.progress[env_ids].mean()
+        mean_contour_error = self._episode_contour_errors[env_ids] / torch.clamp(self._episode_steps[env_ids], min=1)
+        mean_contour_error_value = mean_contour_error.mean()
+        
+        # Compute mean progress velocity for the episode
+        mean_progress_velocity = self._episode_progress_velocities[env_ids] / torch.clamp(self._episode_steps[env_ids], min=1)
+        mean_progress_velocity_value = mean_progress_velocity.mean()
 
         # Update curriculum based on episode performance
         if self._curriculum_manager is not None:
             # Compute mean episode metrics for curriculum
-            mean_contour_error = self._episode_contour_errors[env_ids] / torch.clamp(self._episode_steps[env_ids], min=1)
-            mean_progress_velocity = self._episode_progress_velocities[env_ids] / torch.clamp(self._episode_steps[env_ids], min=1)
             
             # Update curriculum
             self._curriculum_manager.update(mean_contour_error, mean_progress_velocity, env_ids)
@@ -362,12 +423,28 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
 
-        # Add termination statistics
+        # Add termination statistics with detailed breakdown
+        terminated_mask = self.reset_terminated[env_ids]
+        num_terminated = torch.count_nonzero(terminated_mask).item()
+        
+        # Count each termination reason
+        off_track_count = torch.count_nonzero(self._last_off_track[env_ids] & terminated_mask).item()
+        gate_collision_count = torch.count_nonzero(self._last_gate_collision[env_ids] & terminated_mask).item()
+        upside_down_count = torch.count_nonzero(self._last_upside_down[env_ids] & terminated_mask).item()
+        ground_crash_count = torch.count_nonzero(self._last_ground_crash[env_ids] & terminated_mask).item()
+        runaway_count = torch.count_nonzero(self._last_runaway[env_ids] & terminated_mask).item()
+        
         extras = {
-            "Episode_Termination/died": torch.count_nonzero(self.reset_terminated[env_ids]).item(),
+            "Episode_Termination/died": num_terminated,
+            "Episode_Termination/died_off_track": off_track_count,
+            "Episode_Termination/died_gate_collision": gate_collision_count,
+            "Episode_Termination/died_upside_down": upside_down_count,
+            "Episode_Termination/died_ground_crash": ground_crash_count,
+            "Episode_Termination/died_runaway": runaway_count,
             "Episode_Termination/time_out": torch.count_nonzero(self.reset_time_outs[env_ids]).item(),
             "Metrics/final_contour_error": final_contour_error.item(),
-            "Metrics/final_progress": final_progress.item(),
+            "Metrics/mean_contour_error": mean_contour_error_value.item(),
+            "Metrics/mean_progress_velocity": mean_progress_velocity_value.item(),
         }
         self.extras["log"].update(extras)
         
@@ -399,12 +476,18 @@ class QuadcopterEnvCopy(DirectRLEnv):
             # Reset disturbances without difficulty scaling
             self._disturbance_manager.reset_episode_disturbances(env_ids, None)
             
+        # Randomize velocity limit if enabled
+        if self.cfg.randomize_velocity_limit:
+            vl_min, vl_max = self.cfg.velocity_limit_range
+            self._velocity_limit[env_ids] = torch.rand(len(env_ids), device=self.device) * (vl_max - vl_min) + vl_min
+        else:
+            self._velocity_limit[env_ids] = self.cfg.velocity_limit
+            
         self._reward_manager.reset(env_ids)
         self._observation_manager.reset(env_ids)
 
-        # Get starting pose from trajectory
+        # Get starting pose from trajectory (already in world coordinates after offset)
         start_positions, start_orientations = self._trajectory.get_starting_pose(env_ids)
-        start_positions += self._terrain.env_origins[env_ids]
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -416,6 +499,11 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self._robot.write_root_pose_to_sim(root_pose, env_ids)
         self._robot.write_root_velocity_to_sim(root_vel, env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        
+        # Note: Observation history is properly initialized to zero in reset().
+        # The first observation will use zero history, which is correct since
+        # there is no prior state after a reset.
+        # print(f"[TRACE] _reset_idx END")
 
     def _set_debug_vis_impl(self, debug_vis: bool) -> None:
         """Set debug visualization on or off.
@@ -428,6 +516,7 @@ class QuadcopterEnvCopy(DirectRLEnv):
             if not hasattr(self, "closest_point_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
                 marker_cfg.markers["cuboid"].size = (0.08, 0.08, 0.08)
+                marker_cfg.markers["cuboid"].visual_material.diffuse_color = (0.0, 1.0, 0.0)  # Green
                 # -- closest trajectory point
                 marker_cfg.prim_path = "/Visuals/Command/closest_point"
                 self.closest_point_visualizer = VisualizationMarkers(marker_cfg)
@@ -435,13 +524,14 @@ class QuadcopterEnvCopy(DirectRLEnv):
             if not hasattr(self, "lookahead_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
                 marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+                marker_cfg.markers["cuboid"].visual_material.diffuse_color = (1.0, 0.0, 0.0)  # Red
                 # -- lookahead points (will visualize first env only for clarity)
                 marker_cfg.prim_path = "/Visuals/Command/lookahead_points"
                 self.lookahead_visualizer = VisualizationMarkers(marker_cfg)
             
             # Create 4-sided gate visualization (top, bottom, left, right bars)
             gate_size = self.cfg.trajectory.gate_size
-            bar_thickness = 0.08  # Thickness of gate bars
+            bar_thickness = 0.015  # Thickness of gate bars
             
             if not hasattr(self, "gate_top_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
@@ -470,14 +560,24 @@ class QuadcopterEnvCopy(DirectRLEnv):
                 marker_cfg.markers["cuboid"].visual_material.diffuse_color = (1.0, 0.3, 0.0)  # Orange
                 marker_cfg.prim_path = "/Visuals/Command/gates_right"
                 self.gate_right_visualizer = VisualizationMarkers(marker_cfg)
+            
+            # Create trajectory line visualizer using small spheres
+            if not hasattr(self, "trajectory_line_visualizer"):
+                from isaaclab.markers import SPHERE_MARKER_CFG
+                marker_cfg = SPHERE_MARKER_CFG.copy()
+                marker_cfg.markers["sphere"].radius = 0.01  # Small spheres
+                marker_cfg.markers["sphere"].visual_material.diffuse_color = (0.3, 0.7, 1.0)  # Light blue
+                marker_cfg.prim_path = "/Visuals/Command/trajectory_line"
+                self.trajectory_line_visualizer = VisualizationMarkers(marker_cfg)
                 
             # set their visibility to true
-            self.closest_point_visualizer.set_visibility(True)
-            self.lookahead_visualizer.set_visibility(True)
+            self.closest_point_visualizer.set_visibility(False)
+            self.lookahead_visualizer.set_visibility(False)
             self.gate_top_visualizer.set_visibility(True)
             self.gate_bottom_visualizer.set_visibility(True)
             self.gate_left_visualizer.set_visibility(True)
             self.gate_right_visualizer.set_visibility(True)
+            self.trajectory_line_visualizer.set_visibility(False)
         else:
             if hasattr(self, "closest_point_visualizer"):
                 self.closest_point_visualizer.set_visibility(False)
@@ -491,6 +591,8 @@ class QuadcopterEnvCopy(DirectRLEnv):
                 self.gate_left_visualizer.set_visibility(False)
             if hasattr(self, "gate_right_visualizer"):
                 self.gate_right_visualizer.set_visibility(False)
+            if hasattr(self, "trajectory_line_visualizer"):
+                self.trajectory_line_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event) -> None:
         """Update debug visualization markers.
@@ -503,15 +605,15 @@ class QuadcopterEnvCopy(DirectRLEnv):
         self.closest_point_visualizer.visualize(closest_point)
         
         # Show lookahead points for first few environments
-        lookahead_points = self._trajectory.get_lookahead_points(self._robot.data.root_pos_w)
+        lookahead_points = self._trajectory.get_lookahead_points(self._robot.data.root_pos_w, self.cfg.lookahead_distances)
         vis_points = lookahead_points[:self.num_envs].reshape(-1, 3)
         self.lookahead_visualizer.visualize(vis_points)
         
         # Show virtual gates if enabled (4-sided gate visualization)
-        if self._trajectory.gates_enabled and self._trajectory.num_gates > 0:
-            gate_positions, gate_orientations, num_gates = self._trajectory.get_gate_info()
-            # Add environment origin offset for first environment
-            gate_centers = gate_positions + self._terrain.env_origins[0]
+        if self._trajectory.gates_enabled and self._trajectory.num_gates_per_env is not None and self._trajectory.num_gates_per_env.sum() > 0:
+            gate_positions, gate_orientations, num_gates = self._trajectory.get_all_gates_flattened()
+            # Gate positions are already in world coordinates (offset applied during trajectory generation)
+            gate_centers = gate_positions
             
             # Compute positions for 4 bars of each gate
             gate_size = self.cfg.trajectory.gate_size
@@ -520,7 +622,8 @@ class QuadcopterEnvCopy(DirectRLEnv):
             # Transform local offsets to world coordinates using gate orientations
             from isaaclab.utils.math import quat_rotate
             
-            # Top bar: offset upward by half_size in local z
+            # Gate body frame: x=right, y=tangent(through), z=up
+            # Top bar: offset upward by half_size in local z (body-z = up)
             top_offset = torch.zeros(num_gates, 3, device=self.device)
             top_offset[:, 2] = half_size
             top_positions = gate_centers + quat_rotate(gate_orientations, top_offset)
@@ -530,14 +633,14 @@ class QuadcopterEnvCopy(DirectRLEnv):
             bottom_offset[:, 2] = -half_size
             bottom_positions = gate_centers + quat_rotate(gate_orientations, bottom_offset)
             
-            # Left bar: offset left by half_size in local y
+            # Left bar: offset left by half_size in local x (body-x = right, so -x = left)
             left_offset = torch.zeros(num_gates, 3, device=self.device)
-            left_offset[:, 1] = -half_size
+            left_offset[:, 0] = -half_size
             left_positions = gate_centers + quat_rotate(gate_orientations, left_offset)
             
-            # Right bar: offset right by half_size in local y
+            # Right bar: offset right by half_size in local x
             right_offset = torch.zeros(num_gates, 3, device=self.device)
-            right_offset[:, 1] = half_size
+            right_offset[:, 0] = half_size
             right_positions = gate_centers + quat_rotate(gate_orientations, right_offset)
             
             # Visualize each bar with appropriate orientation
@@ -545,3 +648,18 @@ class QuadcopterEnvCopy(DirectRLEnv):
             self.gate_bottom_visualizer.visualize(bottom_positions, gate_orientations)
             self.gate_left_visualizer.visualize(left_positions, gate_orientations)
             self.gate_right_visualizer.visualize(right_positions, gate_orientations)
+        
+        # Visualize trajectory lines using waypoints from all environments
+        if self._trajectory.current_waypoints is not None:
+            # Get all waypoints from all environments and flatten them
+            # Subsample waypoints to reduce visual clutter (every 3rd waypoint)
+            all_waypoints = []
+            for env_id in range(self.num_envs):  # Limit to first 100 envs for performance
+                waypoints = self._trajectory.current_waypoints[env_id]  # [num_waypoints, 3]
+                # Subsample every Xth waypoint
+                # subsampled = waypoints[::1]
+                all_waypoints.append(waypoints)
+            
+            # Flatten all waypoints
+            trajectory_points = torch.cat(all_waypoints, dim=0)
+            self.trajectory_line_visualizer.visualize(trajectory_points)
