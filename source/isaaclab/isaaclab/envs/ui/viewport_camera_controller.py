@@ -198,6 +198,42 @@ class ViewportCameraController:
         # update the camera view
         self.update_view_location()
 
+    def _set_camera_orientation(self, orientation_quat: np.ndarray, camera_prim_path: str = "/OmniverseKit_Persp"):
+        """Set the camera orientation directly using a quaternion.
+        
+        Args:
+            orientation_quat: Quaternion in (w, x, y, z) format.
+            camera_prim_path: The path to the camera primitive in the stage.
+        """
+        try:
+            from pxr import Gf, Sdf, Usd
+            import omni.usd
+            
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(camera_prim_path)
+            
+            if prim.GetAttribute("xformOp:orient"):
+                rotate_prop = prim.GetAttribute("xformOp:orient")
+                # Convert to Gf quaternion (w, x, y, z) -> (w, (x, y, z))
+                if rotate_prop.GetTypeName() == Sdf.ValueTypeNames.Quatd:
+                    new_quat = Gf.Quatd(float(orientation_quat[0]), Gf.Vec3d(float(orientation_quat[1]), float(orientation_quat[2]), float(orientation_quat[3])))
+                elif rotate_prop.GetTypeName() == Sdf.ValueTypeNames.Quatf:
+                    new_quat = Gf.Quatf(float(orientation_quat[0]), Gf.Vec3f(float(orientation_quat[1]), float(orientation_quat[2]), float(orientation_quat[3])))
+                else:
+                    return
+                
+                omni.kit.commands.execute(
+                    "ChangePropertyCommand",
+                    prop_path=rotate_prop.GetPath(),
+                    value=new_quat,
+                    prev=rotate_prop.Get(),
+                    timecode=Usd.TimeCode.Default(),
+                    type_to_create_if_not_exist=rotate_prop.GetTypeName(),
+                )
+        except Exception as e:
+            import carb
+            carb.log_warn(f"Failed to set camera orientation: {e}")
+
     def update_view_location(self, eye: Sequence[float] | None = None, lookat: Sequence[float] | None = None):
         """Updates the camera view pose based on the current viewer origin and the eye and lookat positions.
 
@@ -211,12 +247,90 @@ class ViewportCameraController:
         if lookat is not None:
             self.default_cam_lookat = np.asarray(lookat, dtype=float)
         # set the camera locations
-        viewer_origin = self.viewer_origin.detach().cpu().numpy()
-        cam_eye = viewer_origin + self.default_cam_eye
-        cam_target = viewer_origin + self.default_cam_lookat
+        
+        if self.cfg.origin_type == "asset_body":
+            from isaaclab.utils.math import quat_apply, quat_mul
+            import torch
 
-        # set the camera view
-        self._env.sim.set_camera_view(eye=cam_eye, target=cam_target)
+            # the default eye and lookat are relative to the asset body, so we need to process asset body position and orientation
+            asset: Articulation = self._env.scene[self.cfg.asset_name]
+            body_id, _ = asset.find_bodies(self.cfg.body_name)
+            body_pos = self._env.scene[self.cfg.asset_name].data.body_pos_w[self.cfg.env_index, body_id].view(3)
+            body_quat = self._env.scene[self.cfg.asset_name].data.body_quat_w[self.cfg.env_index, body_id].view(4)
+            # convert numpy arrays to tensors for quat_apply
+            default_eye_tensor = torch.tensor(self.default_cam_eye, dtype=body_pos.dtype, device=body_pos.device)
+            default_lookat_tensor = torch.tensor(self.default_cam_lookat, dtype=body_pos.dtype, device=body_pos.device)
+            # convert the default eye and lookat from the asset body frame to the world frame
+            cam_eye = body_pos + quat_apply(body_quat, default_eye_tensor)
+            cam_target = body_pos + quat_apply(body_quat, default_lookat_tensor)
+            
+            cam_eye_np = cam_eye.cpu().numpy()
+            cam_target_np = cam_target.cpu().numpy()
+            
+            # Compute camera orientation in world frame
+            # The camera orientation in the body frame is determined by the eye->lookat vector
+            # We need to compute a local rotation, then combine it with the body rotation
+            
+            # Compute the local viewing direction (in body frame)
+            view_dir_local = self.default_cam_lookat - self.default_cam_eye
+            view_dir_local_norm = np.linalg.norm(view_dir_local)
+            if view_dir_local_norm > 1e-6:
+                view_dir_local = view_dir_local / view_dir_local_norm
+            else:
+                view_dir_local = np.array([0.0, 0.0, -1.0])  # Default forward
+            
+            # Camera looks along -Z in USD, so we need rotation from -Z to view_dir_local
+            # Use body orientation to transform this to world frame
+            # For a camera rigidly attached to the body, we want:
+            # cam_quat_world = body_quat * cam_quat_local
+            
+            # Compute local camera quaternion (rotation from -Z to view_dir_local)
+            from isaaclab.utils.math import quat_from_angle_axis, quat_mul
+            default_forward = np.array([0.0, 0.0, -1.0])
+            
+            # Compute rotation axis and angle
+            cross = np.cross(default_forward, view_dir_local)
+            dot = np.dot(default_forward, view_dir_local)
+            
+            if np.linalg.norm(cross) < 1e-6:  # Parallel or anti-parallel
+                if dot > 0:  # Same direction
+                    cam_quat_local = np.array([1.0, 0.0, 0.0, 0.0])  # Identity
+                else:  # Opposite direction
+                    cam_quat_local = np.array([0.0, 0.0, 1.0, 0.0])  # 180° around Y
+            else:
+                # Normalize cross product to get axis
+                axis = cross / np.linalg.norm(cross)
+                angle = np.arccos(np.clip(dot, -1.0, 1.0))
+                # Convert to quaternion: q = [cos(θ/2), sin(θ/2) * axis]
+                half_angle = angle / 2.0
+                cam_quat_local = np.array([
+                    np.cos(half_angle),
+                    np.sin(half_angle) * axis[0],
+                    np.sin(half_angle) * axis[1],
+                    np.sin(half_angle) * axis[2]
+                ])
+            
+            # Convert to tensors for quaternion multiplication
+            body_quat_tensor = body_quat.view(4)
+            cam_quat_local_tensor = torch.tensor(cam_quat_local, dtype=body_quat.dtype, device=body_quat.device)
+            
+            # Combine: world orientation = body_quat * local_quat
+            cam_orientation_tensor = quat_mul(body_quat_tensor, cam_quat_local_tensor)
+            cam_orientation = cam_orientation_tensor.cpu().numpy()  # (w, x, y, z)
+            
+            # Set position and target first
+            self._env.sim.set_camera_view(eye=cam_eye_np, target=cam_target_np, camera_prim_path=self.cfg.cam_prim_path)
+            
+            # Then override the orientation to match the body orientation
+            # This makes the camera rigidly attached to the body
+            self._set_camera_orientation(cam_orientation, self.cfg.cam_prim_path)
+        else:
+            viewer_origin = self.viewer_origin.detach().cpu().numpy()
+            cam_eye = viewer_origin + self.default_cam_eye
+            cam_target = viewer_origin + self.default_cam_lookat
+
+            # set the camera view
+            self._env.sim.set_camera_view(eye=cam_eye, target=cam_target, camera_prim_path=self.cfg.cam_prim_path)
 
     """
     Private Functions

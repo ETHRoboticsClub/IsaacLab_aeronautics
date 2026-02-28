@@ -8,6 +8,7 @@ from dataclasses import MISSING
 from typing import Literal
 
 import isaaclab.terrains.trimesh.mesh_terrains as mesh_terrains
+import isaaclab.terrains.trimesh.racing_gates as racing_gates
 import isaaclab.terrains.trimesh.utils as mesh_utils_terrains
 from isaaclab.utils import configclass
 
@@ -314,3 +315,48 @@ class MeshRepeatedCylindersTerrainCfg(MeshRepeatedObjectsTerrainCfg):
 
     object_params_end: ObjectCfg = MISSING
     """The box curriculum parameters at the end of the curriculum."""
+
+
+@configclass
+class MeshRacingGatesTerrainCfg(SubTerrainBaseCfg):
+    """Configuration for a racing gates terrain.
+    
+    This terrain generates a flat ground plane with racing gates placed along
+    a procedurally generated trajectory. Gates are rectangular frames that
+    the robot must fly through.
+    """
+
+    function = racing_gates.racing_gates_terrain
+
+    # Trajectory parameters
+    trajectory_type: str = "figure8"
+    """Type of trajectory to generate. Options: "figure8", "oval", "random". Defaults to "figure8"."""
+
+    num_waypoints: int = 100
+    """Number of waypoints to generate for the trajectory. Defaults to 100."""
+
+    seed: int | None = None
+    """Random seed for trajectory generation. Defaults to None (random)."""
+
+    # Gate parameters
+    gate_spacing: float = 4.0
+    """Distance between gates along the trajectory (in m). Defaults to 4.0."""
+
+    gate_spacing_range: tuple[float, float] | None = None
+    """Range of gate spacing (min, max) in meters. If None, uses fixed gate_spacing. Defaults to None."""
+
+    min_gates: int = 3
+    """Minimum number of gates to generate. Should match num_next_gates in observation config. Defaults to 3."""
+
+    gate_size_range: tuple[float, float] = (0.4, 0.8)
+    """Range of gate opening sizes (min, max) in meters. Difficulty interpolates between max and min."""
+
+    gate_height_range: tuple[float, float] = (1.0, 2.5)
+    """Range of gate heights above ground (min, max) in meters. Defaults to (1.0, 2.5)."""
+
+    bar_thickness: float = 0.05
+    """Thickness of the gate frame bars (in m). Defaults to 0.05."""
+
+    gate_color: tuple[float, float, float] = (1.0, 0.3, 0.0)
+    """RGB color of the gates (0-1 range). Defaults to orange."""
+

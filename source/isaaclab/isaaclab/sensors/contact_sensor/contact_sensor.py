@@ -295,6 +295,9 @@ class ContactSensor(SensorBase):
                 "Failed to initialize contact reporter for specified bodies."
                 f"\n\tInput prim path    : {self.cfg.prim_path}"
                 f"\n\tResolved prim paths: {body_names_regex}"
+                f"\n\tNumber of bodies with contact reporter API: {len(body_names)}"
+                f"\n\tNumber of bodies in contact reporter view: {self._num_bodies}"
+                "\nHINT: Make sure that the bodies matching the specified prim path have the PhysX ContactReportAPI and that the filter patterns are correct."
             )
 
         # prepare data buffers

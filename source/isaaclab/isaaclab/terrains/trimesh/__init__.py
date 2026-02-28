@@ -20,6 +20,7 @@ from .mesh_terrains_cfg import (
     MeshPitTerrainCfg,
     MeshPlaneTerrainCfg,
     MeshPyramidStairsTerrainCfg,
+    MeshRacingGatesTerrainCfg,
     MeshRailsTerrainCfg,
     MeshRandomGridTerrainCfg,
     MeshRepeatedBoxesTerrainCfg,
@@ -27,3 +28,4 @@ from .mesh_terrains_cfg import (
     MeshRepeatedPyramidsTerrainCfg,
     MeshStarTerrainCfg,
 )
+from .racing_gates import GateData, clear_gate_registry, get_gate_registry

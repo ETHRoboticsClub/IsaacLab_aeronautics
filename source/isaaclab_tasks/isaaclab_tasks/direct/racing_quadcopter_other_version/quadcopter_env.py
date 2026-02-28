@@ -18,23 +18,15 @@ import numpy as np
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg
-from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.envs.common import ViewerCfg
-from isaaclab.envs.ui import BaseEnvWindow
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import CUBOID_MARKER_CFG, VisualizationMarkers
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
-from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.terrains.config.racing import create_racing_gates_terrain
+from isaaclab.sensors import ContactSensor
 from isaaclab.terrains.trimesh.racing_gates import get_gate_registry
-from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
-from isaaclab_assets import CRAZYFLIE_CFG
-from .reward_manager import GateRewardManager, RewardWeights
-
-from .reward_manager import GateRewardManager, RewardWeights
+from .quadcopter_env_cfg import RacingQuadcopterEnvCfg
+from .reward_manager import GateRewardManager
 
 
 # ---------------------------------------------------------------------------
@@ -42,185 +34,15 @@ from .reward_manager import GateRewardManager, RewardWeights
 # ---------------------------------------------------------------------------
 
 
-class QuadcopterEnvWindow(BaseEnvWindow):
-    """Window manager for the Quadcopter environment."""
+# class QuadcopterEnvWindow(BaseEnvWindow):
+#     """Window manager for the Quadcopter environment."""
 
-    def __init__(self, env: "RacingQuadcopterEnv", window_name: str = "IsaacLab"):
-        super().__init__(env, window_name)
-        with self.ui_window_elements["main_vstack"]:
-            with self.ui_window_elements["debug_frame"]:
-                with self.ui_window_elements["debug_vstack"]:
-                    self._create_debug_vis_ui_element("targets", self.env)
-
-
-# ---------------------------------------------------------------------------
-# Sub-configs
-# ---------------------------------------------------------------------------
-
-
-@configclass
-class GateRewardConfig:
-    """Configuration for gate-based rewards.
-    
-    Primary rewards encourage gate passage and proper trajectory.
-    Penalties discourage unsafe or inefficient behavior.
-    """
-
-    # Primary rewards (positive)
-    gate_passage_reward: float = 20.0   # Large reward for passing through gate
-    gate_progress_scale: float = 2.0     # Reward for moving toward next gate
-    gate_centering_scale: float = 0.5    # Reward for staying aligned with gate center
-    velocity_toward_gate_scale: float = 0.1  # Reward for velocity toward gate
-    
-    # Penalties (negative)
-    velocity_limit_penalty_scale: float = -0.05
-    orientation_penalty_scale: float = -0.005
-    ang_vel_penalty_scale: float = -0.001
-    action_smoothness_scale: float = -0.0001
-    crash_penalty: float = -50.0
-    wrong_side_penalty_scale: float = -0.1
-
-    reward_scale: float = 1/100.0 # Overall scaling to keep rewards in a reasonable range
-    
-    def to_reward_weights(self) -> RewardWeights:
-        """Convert to RewardWeights dataclass."""
-        return RewardWeights(
-            gate_passage=self.gate_passage_reward,
-            gate_progress=self.gate_progress_scale,
-            gate_centering=self.gate_centering_scale,
-            velocity_toward_gate=self.velocity_toward_gate_scale,
-            velocity_limit=self.velocity_limit_penalty_scale,
-            orientation=self.orientation_penalty_scale,
-            angular_velocity=self.ang_vel_penalty_scale,
-            action_smoothness=self.action_smoothness_scale,
-            crash=self.crash_penalty,
-            wrong_side=self.wrong_side_penalty_scale,
-            reward_scale=self.reward_scale,
-        )
-
-
-@configclass
-class GateObservationConfig:
-    """Configuration for gate-based observations."""
-
-    num_next_gates: int = 5  # Increased from 3 to 5 for longer trajectories
-    history_length: int = 0
-    include_velocity_limit: bool = True
-
-
-# ---------------------------------------------------------------------------
-# Main environment config
-# ---------------------------------------------------------------------------
-
-
-@configclass
-class RacingQuadcopterEnvCfg(DirectRLEnvCfg):
-    """Configuration for racing quadcopter environment with terrain-generated gates."""
-
-    # Environment settings
-    episode_length_s: float = 20.0
-    decimation: int = 2
-    action_space: int = 4
-    state_space: int = 0
-    debug_vis: bool = False
-
-    # Velocity settings
-    velocity_limit: float = 15.0
-    randomize_velocity_limit: bool = False
-    velocity_limit_range: tuple[float, float] = (8.0, 15.0)
-
-    # Reward / observation sub-configs
-    reward: GateRewardConfig = GateRewardConfig()
-    observation: GateObservationConfig = GateObservationConfig()
-
-    # Observation space (recalculated in __post_init__)
-    # lin_vel(3) + ang_vel(3) + gravity(3) + vel_limit(1) + gates(N * 6)
-    # Each gate: rel_pos(3) + forward_dir(3)
-    observation_space: int = 10 + 5 * 6  # Updated for 5 gates
-
-    # Termination thresholds
-    upside_down_threshold: float = 0.7
-    min_height: float = 0.2
-    max_velocity: float = 50.0
-
-    # UI
-    ui_window_class_type = QuadcopterEnvWindow
-
-    # Simulation
-    sim: SimulationCfg = SimulationCfg(
-        dt=1 / 50,
-        render_interval=2,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-    )
-
-    # Terrain with racing gates (configured in __post_init__ based on observation config)
-    terrain: TerrainImporterCfg = None
-
-    # Scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1024,
-        env_spacing=5.0,  # Increased spacing for larger terrain (15x15m)
-        replicate_physics=True,
-        clone_in_fabric=True,
-    )
-
-    camera_on_drone: bool = False
-
-    if camera_on_drone:
-        viewer: ViewerCfg = ViewerCfg(
-            eye=(-0.1, 0.0, 0.1), lookat=(5.0, 0.0, -0.5), origin_type="asset_root", env_index=0, asset_name="robot", body_name="body")
-    else:
-        # Position camera to see the first environment's terrain (15x15m terrain)
-        viewer: ViewerCfg = ViewerCfg(
-            eye=(25.0, 25.0, 15.0), lookat=(10.0, 10.0, 2.5), origin_type="world")
-
-
-    # Robot
-    # robot: ArticulationCfg = CRAZYFLIE_CFG.replace(
-    #     prim_path="/World/envs/env_.*/Robot",
-    # )
-
-    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot").\
-                                           replace(spawn = CRAZYFLIE_CFG.spawn.replace(activate_contact_sensors=False))
-    thrust_to_weight: float = 1.9
-    moment_scale: float = 0.01
-
-    def __post_init__(self):
-        """Post initialization."""
-        base = 10  # lin_vel(3) + ang_vel(3) + gravity(3) + vel_limit(1)
-        gates = self.observation.num_next_gates * 6  # position(3) + forward_direction(3) for each gate
-        history = self.observation.history_length * 10 if self.observation.history_length > 0 else 0
-        self.observation_space = base + gates + history
-        self.sim.render_interval = self.decimation
-        
-        # Use enhanced configuration for longer, more complex trajectories
-        from isaaclab.terrains.config.racing import RACING_GATES_SIMPLE_CFG
-        from isaaclab.terrains import terrain_generator as terrain_gen
-        print(f"[DEBUG] Creating enhanced racing terrain for longer, more complex trajectories")
-        
-        # Create enhanced configuration with longer, more challenging trajectories
-        terrain_generator = create_racing_gates_terrain()
-        
-        self.terrain = TerrainImporterCfg(
-            prim_path="/World/ground",
-            terrain_type="generator",
-            terrain_generator=terrain_generator,
-            max_init_terrain_level=0,
-            collision_group=-1,
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                friction_combine_mode="multiply",
-                restitution_combine_mode="multiply",
-                static_friction=1.0,
-                dynamic_friction=1.0,
-            ),
-            debug_vis=True,
-        )
+#     def __init__(self, env: "RacingQuadcopterEnv", window_name: str = "IsaacLab"):
+#         super().__init__(env, window_name)
+#         with self.ui_window_elements["main_vstack"]:
+#             with self.ui_window_elements["debug_frame"]:
+#                 with self.ui_window_elements["debug_vstack"]:
+#                     self._create_debug_vis_ui_element("targets", self.env)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +83,8 @@ class RacingQuadcopterEnv(DirectRLEnv):
 
         # --- gate tracking (populated by _setup_gate_tracking) ---
         self._setup_gate_tracking()
+        
+        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(".*")
 
         # --- observation history ---
         if cfg.observation.history_length > 0:
@@ -285,6 +109,7 @@ class RacingQuadcopterEnv(DirectRLEnv):
         # --- episode metrics tracking ---
         self._episode_velocity_sum = torch.zeros(self.num_envs, device=self.device)
         self._episode_step_count = torch.zeros(self.num_envs, device=self.device)
+        self._episode_collision_count = torch.zeros(self.num_envs, device=self.device)
 
         # debug vis
         self.set_debug_vis(self.cfg.debug_vis)
@@ -296,6 +121,10 @@ class RacingQuadcopterEnv(DirectRLEnv):
     def _setup_scene(self) -> None:
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
+        
+        # Contact sensor for collision detection
+        self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
 
         # Terrain (spawns gate meshes as part of the trimesh)
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -519,10 +348,10 @@ class RacingQuadcopterEnv(DirectRLEnv):
         # Check for gate passages
         gate_passed = self._check_gate_passages(drone_pos)
         
-        # Check for crashes (ground collision or upside down)
+        # Check for crashes (ground collision, upside down, or contact sensor collision)
         crashed = (
-            (drone_pos[:, 2] < self.cfg.min_height) |
-            (self._robot.data.projected_gravity_b[:, 2] > self.cfg.upside_down_threshold)
+            # (drone_pos[:, 2] < self.cfg.min_height) |
+            self._check_collision()
         )
         
         # Compute all rewards using manager
@@ -556,6 +385,10 @@ class RacingQuadcopterEnv(DirectRLEnv):
         speed = torch.norm(drone_vel, dim=1)
         self._episode_velocity_sum += speed
         self._episode_step_count += 1.0
+        
+        # Track collision occurrences
+        collision_occurred = self._check_collision()
+        self._episode_collision_count += collision_occurred.float()
         
         # Update previous position for next step
         self._prev_drone_pos = drone_pos.clone()
@@ -605,12 +438,32 @@ class RacingQuadcopterEnv(DirectRLEnv):
     # Termination
     # ------------------------------------------------------------------
 
+    def _check_collision(self) -> torch.Tensor:
+        """Check for collisions using contact sensor forces.
+        
+        Returns:
+            torch.Tensor: Boolean tensor [N] indicating which environments have collisions
+        """
+        # Get contact forces from contact sensor history
+        # net_forces_w_history: [N, history_length, num_bodies, 3]
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history
+        
+        collision_detected = torch.any(torch.max(torch.norm(
+            net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=1)[0]
+                                       > self.cfg.collision_force_threshold, dim=1)
+
+        return collision_detected
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         upside_down = self._robot.data.projected_gravity_b[:, 2] > self.cfg.upside_down_threshold
-        crash = self._robot.data.root_pos_w[:, 2] < self.cfg.min_height
+        # crash = self._robot.data.root_pos_w[:, 2] < self.cfg.min_height
         runaway = torch.norm(self._robot.data.root_lin_vel_w, dim=1) > self.cfg.max_velocity
-        died = upside_down | crash | runaway
+        
+        # Check for collisions using contact sensor forces
+        collision = self._check_collision()
+        
+        died = runaway | collision | upside_down  # | crash
         return died, time_out
 
     # ------------------------------------------------------------------
@@ -637,12 +490,16 @@ class RacingQuadcopterEnv(DirectRLEnv):
                 extras["Episode_Metrics/mean_velocity"] = mean_vel
             else:
                 extras["Episode_Metrics/mean_velocity"] = 0.0
+                
+            # Add collision metrics
+            extras["Episode_Metrics/collision_count"] = self._episode_collision_count[env_ids].mean().item()
             
             self.extras["log"] = extras
         
         # Reset episode metrics
         self._episode_velocity_sum[env_ids] = 0.0
         self._episode_step_count[env_ids] = 0.0
+        self._episode_collision_count[env_ids] = 0.0
 
         super()._reset_idx(env_ids)
 
