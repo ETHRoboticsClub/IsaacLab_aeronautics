@@ -104,6 +104,9 @@ def racing_gates_terrain(
     # Compute gate size based on difficulty
     gate_size = cfg.gate_size_range[1] - difficulty * (cfg.gate_size_range[1] - cfg.gate_size_range[0])
 
+    # Create RNG for gate placement (reuse seed for consistency)
+    placement_rng = np.random.default_rng(cfg.seed) if cfg.seed is not None else np.random.default_rng()
+
     # Generate gates along trajectory
     gate_positions, gate_orientations = _place_gates_along_trajectory(
         waypoints=waypoints,
@@ -112,6 +115,7 @@ def racing_gates_terrain(
         size=cfg.size,
         gate_spacing_range=cfg.gate_spacing_range,
         min_gates=cfg.min_gates,
+        rng=placement_rng,
     )
 
     print(f"[DEBUG] Generated {len(gate_positions)} gates with size {gate_size:.2f}m at heights "
@@ -349,6 +353,7 @@ def _place_gates_along_trajectory(
     size: tuple[float, float],
     gate_spacing_range: tuple[float, float] | None = None,
     min_gates: int = 3,
+    rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Place gates at intervals along the trajectory.
     
@@ -384,8 +389,11 @@ def _place_gates_along_trajectory(
     gate_positions = []
     gate_orientations = []
     
+    # Use provided RNG or create default one
+    if rng is None:
+        rng = np.random.default_rng()
+    
     # Generate random spacings if range is provided
-    rng = np.random.default_rng()
     if gate_spacing_range is not None:
         spacings = rng.uniform(gate_spacing_range[0], gate_spacing_range[1], num_gates)
     else:

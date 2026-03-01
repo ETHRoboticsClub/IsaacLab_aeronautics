@@ -20,7 +20,7 @@ gym.register(
     entry_point=f"{__name__}.quadcopter_env:RacingQuadcopterEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.quadcopter_env:RacingQuadcopterEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.quadcopter_env_cfg:RacingQuadcopterEnvCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RacingQuadcopterPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",

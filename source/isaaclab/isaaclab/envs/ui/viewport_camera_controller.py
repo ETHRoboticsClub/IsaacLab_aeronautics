@@ -252,78 +252,53 @@ class ViewportCameraController:
             from isaaclab.utils.math import quat_apply, quat_mul
             import torch
 
-            # the default eye and lookat are relative to the asset body, so we need to process asset body position and orientation
+            # Camera is rigidly attached to the body frame
             asset: Articulation = self._env.scene[self.cfg.asset_name]
             body_id, _ = asset.find_bodies(self.cfg.body_name)
             body_pos = self._env.scene[self.cfg.asset_name].data.body_pos_w[self.cfg.env_index, body_id].view(3)
             body_quat = self._env.scene[self.cfg.asset_name].data.body_quat_w[self.cfg.env_index, body_id].view(4)
-            # convert numpy arrays to tensors for quat_apply
-            default_eye_tensor = torch.tensor(self.default_cam_eye, dtype=body_pos.dtype, device=body_pos.device)
-            default_lookat_tensor = torch.tensor(self.default_cam_lookat, dtype=body_pos.dtype, device=body_pos.device)
-            # convert the default eye and lookat from the asset body frame to the world frame
-            cam_eye = body_pos + quat_apply(body_quat, default_eye_tensor)
-            cam_target = body_pos + quat_apply(body_quat, default_lookat_tensor)
             
+            # Camera eye position: body_pos + rotate(body_quat, eye_offset_in_body_frame)
+            eye_offset_tensor = torch.tensor(self.default_cam_eye, dtype=body_pos.dtype, device=body_pos.device)
+            cam_eye = body_pos + quat_apply(body_quat, eye_offset_tensor)
+            
+            # Camera target: just the body position (look at the robot center)
+            cam_target = body_pos
+            
+            # Convert to numpy
             cam_eye_np = cam_eye.cpu().numpy()
             cam_target_np = cam_target.cpu().numpy()
             
-            # Compute camera orientation in world frame
-            # The camera orientation in the body frame is determined by the eye->lookat vector
-            # We need to compute a local rotation, then combine it with the body rotation
+            # Compute camera local frame orientation
+            # View direction in body frame: from eye_offset toward origin
+            view_dir_body = -self.default_cam_eye / (np.linalg.norm(self.default_cam_eye) + 1e-8)
             
-            # Compute the local viewing direction (in body frame)
-            view_dir_local = self.default_cam_lookat - self.default_cam_eye
-            view_dir_local_norm = np.linalg.norm(view_dir_local)
-            if view_dir_local_norm > 1e-6:
-                view_dir_local = view_dir_local / view_dir_local_norm
-            else:
-                view_dir_local = np.array([0.0, 0.0, -1.0])  # Default forward
+            # Up direction in body frame (Z-up)
+            up_body = np.array([0.0, 0.0, 1.0])
             
-            # Camera looks along -Z in USD, so we need rotation from -Z to view_dir_local
-            # Use body orientation to transform this to world frame
-            # For a camera rigidly attached to the body, we want:
-            # cam_quat_world = body_quat * cam_quat_local
+            # Right = view × up
+            right_body = np.cross(view_dir_body, up_body)
+            right_body = right_body / (np.linalg.norm(right_body) + 1e-8)
             
-            # Compute local camera quaternion (rotation from -Z to view_dir_local)
-            from isaaclab.utils.math import quat_from_angle_axis, quat_mul
-            default_forward = np.array([0.0, 0.0, -1.0])
+            # Recompute up = right × view
+            up_body = np.cross(right_body, view_dir_body)
             
-            # Compute rotation axis and angle
-            cross = np.cross(default_forward, view_dir_local)
-            dot = np.dot(default_forward, view_dir_local)
+            # Build rotation matrix (camera convention: X=right, Y=up, Z=backward)
+            # Columns are basis vectors
+            R_cam_body = np.column_stack([right_body, up_body, -view_dir_body])
             
-            if np.linalg.norm(cross) < 1e-6:  # Parallel or anti-parallel
-                if dot > 0:  # Same direction
-                    cam_quat_local = np.array([1.0, 0.0, 0.0, 0.0])  # Identity
-                else:  # Opposite direction
-                    cam_quat_local = np.array([0.0, 0.0, 1.0, 0.0])  # 180° around Y
-            else:
-                # Normalize cross product to get axis
-                axis = cross / np.linalg.norm(cross)
-                angle = np.arccos(np.clip(dot, -1.0, 1.0))
-                # Convert to quaternion: q = [cos(θ/2), sin(θ/2) * axis]
-                half_angle = angle / 2.0
-                cam_quat_local = np.array([
-                    np.cos(half_angle),
-                    np.sin(half_angle) * axis[0],
-                    np.sin(half_angle) * axis[1],
-                    np.sin(half_angle) * axis[2]
-                ])
+            # Convert to quaternion
+            from scipy.spatial.transform import Rotation
+            q = Rotation.from_matrix(R_cam_body).as_quat()  # [x, y, z, w]
+            cam_quat_body = np.array([q[3], q[0], q[1], q[2]])  # [w, x, y, z]
             
-            # Convert to tensors for quaternion multiplication
-            body_quat_tensor = body_quat.view(4)
-            cam_quat_local_tensor = torch.tensor(cam_quat_local, dtype=body_quat.dtype, device=body_quat.device)
+            # Transform camera orientation to world: quat_world = body_quat * cam_quat_body
+            cam_quat_body_tensor = torch.tensor(cam_quat_body, dtype=body_quat.dtype, device=body_quat.device)
+            cam_quat_world = quat_mul(body_quat, cam_quat_body_tensor)
             
-            # Combine: world orientation = body_quat * local_quat
-            cam_orientation_tensor = quat_mul(body_quat_tensor, cam_quat_local_tensor)
-            cam_orientation = cam_orientation_tensor.cpu().numpy()  # (w, x, y, z)
-            
-            # Set position and target first
+            # Set camera position and orientation
             self._env.sim.set_camera_view(eye=cam_eye_np, target=cam_target_np, camera_prim_path=self.cfg.cam_prim_path)
-            
-            # Then override the orientation to match the body orientation
-            # This makes the camera rigidly attached to the body
-            self._set_camera_orientation(cam_orientation, self.cfg.cam_prim_path)
+            self._set_camera_orientation(cam_quat_world.cpu().numpy(), self.cfg.cam_prim_path)
         else:
             viewer_origin = self.viewer_origin.detach().cpu().numpy()
             cam_eye = viewer_origin + self.default_cam_eye
