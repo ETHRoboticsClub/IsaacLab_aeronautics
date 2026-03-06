@@ -111,6 +111,7 @@ class RacingQuadcopterEnvCfg(DirectRLEnvCfg):
     action_space: int = 4
     state_space: int = 0
     debug_vis: bool = False
+    eval_mode: bool = False  # When True, truncate episodes on lap completion
 
     # Velocity settings
     velocity_limit: float = 15.0

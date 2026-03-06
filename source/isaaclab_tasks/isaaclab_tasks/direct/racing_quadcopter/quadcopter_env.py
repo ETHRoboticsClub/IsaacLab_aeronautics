@@ -100,7 +100,7 @@ class RacingQuadcopterEnv(DirectRLEnv):
         # --- collision curriculum tracking (per-environment) ---
         self._collision_detection_enabled = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # Save final episode metrics for curriculum (updated at reset time)
-        self._last_episode_gates_passed = torch.zeros(self.num_envs, device=self.device)
+        self._last_episode_gates_passed = torch.zeros(self.num_envs, device=self.device) # DO NOT DELETE, USED IN EVALUATION
         self._last_episode_mean_velocity = torch.zeros(self.num_envs, device=self.device)
         self._last_episode_center_offset = torch.zeros(self.num_envs, device=self.device)
 
@@ -456,9 +456,6 @@ class RacingQuadcopterEnv(DirectRLEnv):
             dim=1
         )
         
-        # Only apply collision detection to environments where curriculum enables it
-        collision_detected = collision_detected & self._collision_detection_enabled
-
         return collision_detected
 
     # ------------------------------------------------------------------
@@ -468,19 +465,19 @@ class RacingQuadcopterEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         upside_down = self._robot.data.projected_gravity_b[:, 2] > self.cfg.upside_down_threshold
-        # crash = self._robot.data.root_pos_w[:, 2] < self.cfg.min_height
         runaway = torch.norm(self._robot.data.root_lin_vel_w, dim=1) > self.cfg.max_velocity
         
         collision = self._check_collision()
-        
+
+        lap_complete = self._gates_passed >= self._num_gates if self.cfg.eval_mode else torch.zeros_like(time_out)
         died = runaway | upside_down | collision
-        return died, time_out
+        return died, time_out | lap_complete
 
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
 
-    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
+    def _reset_idx(self, env_ids: torch.Tensor) -> None:
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
