@@ -26,10 +26,13 @@ from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 from .domain_randomization import EventCfg, make_event_cfg
+from isaaclab_assets import OUR_DRONE_CFG_USD, OUR_DRONE_CFG_URDF
 
 
 
 _SIM_DT = 1 / 100
+DRONE_MODEL = "our_usd"
+assert DRONE_MODEL in ["our_usd", "our_urdf", "crazyflie"], f"Invalid drone model specified: {DRONE_MODEL}"
 
 
 class HoveringQuadcopterEnvWindow(BaseEnvWindow):
@@ -99,14 +102,23 @@ class HoveringQuadcopterEnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
+        num_envs=4096, env_spacing=2.5, replicate_physics=True, clone_in_fabric=False
     )
 
     # Randomization
     events: EventCfg | None = make_event_cfg()
 
     # robot
-    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    robot_cfg = None
+    if DRONE_MODEL == "our_usd":
+        robot_cfg = OUR_DRONE_CFG_USD.replace(prim_path="/World/envs/env_.*/Robot")
+    elif DRONE_MODEL == "our_urdf":
+        robot_cfg = OUR_DRONE_CFG_URDF.replace(prim_path="/World/envs/env_.*/Robot")
+    elif DRONE_MODEL == "crazyflie":
+        robot_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = robot_cfg
+
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
@@ -125,7 +137,7 @@ class HoveringQuadcopterEnvCfg_PLAY(HoveringQuadcopterEnvCfg):
     goal_swap_prob_step = _SIM_DT * goal_swap_prob_seconds
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=64, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
+        num_envs=64, env_spacing=2.5, replicate_physics=True, clone_in_fabric=False
     )
 
 

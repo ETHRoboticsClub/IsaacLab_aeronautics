@@ -25,7 +25,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
-from .hovering_quadcopter_env_cfg import HoveringQuadcopterEnvCfg
+from .hovering_quadcopter_env_cfg import HoveringQuadcopterEnvCfg, DRONE_MODEL
 from .reward_manager import RewardManager, RewardWeights
 
 
@@ -58,7 +58,8 @@ class HoveringQuadcopterEnv(DirectRLEnv):
 
 
         # Get specific body indices
-        self._body_id = self._robot.find_bodies("body")[0]
+        body_name = "body" if DRONE_MODEL == "crazyflie" else "base_link"
+        self._body_id = self._robot.find_bodies(body_name)[0] # 'body' for crazyflie, 'base_link' for our drone
         self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
@@ -75,6 +76,20 @@ class HoveringQuadcopterEnv(DirectRLEnv):
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
+
+        # DEBUG: inspect what got spawned
+        '''import omni.usd
+        stage = omni.usd.get_context().get_stage()
+        print("=" * 60)
+        for prim in stage.Traverse():
+            path = str(prim.GetPath())
+            if "envs" in path and ("Robot" in path or "env_" in path):
+                # Only print top-level env prims, not deep children
+                depth = path.count("/")
+                if depth <= 5:
+                    print(f"  {path}  ({prim.GetTypeName()})")
+        print("=" * 60)'''
+
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
