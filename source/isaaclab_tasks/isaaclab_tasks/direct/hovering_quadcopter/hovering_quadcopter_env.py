@@ -28,6 +28,7 @@ from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 from .hovering_quadcopter_env_cfg import HoveringQuadcopterEnvCfg, DRONE_MODEL
 from .reward_manager import RewardManager, RewardWeights
 
+#Hello
 
 class HoveringQuadcopterEnv(DirectRLEnv):
     cfg: HoveringQuadcopterEnvCfg
